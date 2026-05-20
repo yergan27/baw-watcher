@@ -12,6 +12,9 @@ import logging
 import os
 import sys
 
+from commands import TelegramCommandBot
+from history import HistoryStore
+from lan_probe import baw_responde_en_lan
 from notifier import MultiNotifier, TelegramNotifier, WhatsAppNotifier
 from tuya_cloud import TuyaCloudClient
 from watcher import Watcher
@@ -76,17 +79,57 @@ def main():
 
     notifier = MultiNotifier(channels=channels)
 
+    # ── Historial de eventos ───────────────────────────────────────
+    # systemd con `StateDirectory=baw-watcher` deja la DB en
+    # /var/lib/baw-watcher y exporta STATE_DIRECTORY. Fuera de systemd
+    # (correr a mano, tests) cae al directorio actual.
+    history_path = _env("HISTORY_DB_PATH") or os.path.join(
+        os.environ.get("STATE_DIRECTORY", "."), "history.db")
+    history = HistoryStore(history_path)
+
+    # ── Chequeo del BAW en la red local ────────────────────────────
+    # Si hay IP del BAW configurada, las alertas de desconexión
+    # distinguen "corte de luz" de "se cayó la nube". Sin IP, el
+    # watcher sigue funcionando con el diagnóstico genérico.
+    lan_probe_fn = None
+    baw_lan_ip = _env("BAW_LAN_IP")
+    if baw_lan_ip:
+        lan_probe_fn = lambda: baw_responde_en_lan(baw_lan_ip)  # noqa: E731
+        log.info("Chequeo LAN habilitado contra %s", baw_lan_ip)
+    else:
+        log.warning("Sin BAW_LAN_IP — las alertas de desconexión no "
+                    "podrán distinguir corte de luz de caída de la nube")
+
     # ── Watcher ───────────────────────────────────────────────────
     poll_s = float(_env("POLL_INTERVAL_S", "5"))
     repeat_s = float(_env("REPEAT_AFTER_S", str(30 * 60)))
-    offline_after = int(_env("OFFLINE_ALERT_AFTER_TICKS", "6"))
-    Watcher(
+    offline_after = int(_env("OFFLINE_ALERT_AFTER_TICKS", "3"))
+    watcher = Watcher(
         fetch_fn=client.fetch_state,
         notifier=notifier,
         poll_interval_s=poll_s,
         repeat_after_s=repeat_s,
         offline_alert_after_ticks=offline_after,
-    ).run()
+        lan_probe_fn=lan_probe_fn,
+        history=history,
+    )
+
+    # ── Bot de comandos de Telegram ────────────────────────────────
+    # Camino de entrada: el operador pregunta /estado o /historial.
+    # Solo se habilita si Telegram está configurado.
+    if tg_token and tg_chats:
+        bot = TelegramCommandBot(
+            token=tg_token,
+            allowed_chat_ids=tg_chats,
+            handlers={
+                "estado": watcher.estado_texto,
+                "historial": history.resumen_texto,
+            },
+        )
+        bot.start()
+        log.info("Bot de comandos habilitado (/estado, /historial)")
+
+    watcher.run()
 
 
 if __name__ == "__main__":
