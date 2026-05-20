@@ -1,0 +1,3 @@
+# El watcher corre en Linux (peppygate). Forzar LF en todo para que un
+# checkout/edición en Windows no rompa install.sh ni la unit de systemd.
+* text=auto eol=lf
