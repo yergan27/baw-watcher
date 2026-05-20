@@ -14,7 +14,7 @@ import sys
 
 from commands import TelegramCommandBot
 from history import HistoryStore
-from lan_probe import baw_responde_en_lan
+from lan_probe import BAWLocator, baw_responde_en_lan
 from notifier import MultiNotifier, TelegramNotifier, WhatsAppNotifier
 from tuya_cloud import TuyaCloudClient
 from watcher import Watcher
@@ -88,17 +88,25 @@ def main():
     history = HistoryStore(history_path)
 
     # ── Chequeo del BAW en la red local ────────────────────────────
-    # Si hay IP del BAW configurada, las alertas de desconexión
-    # distinguen "corte de luz" de "se cayó la nube". Sin IP, el
-    # watcher sigue funcionando con el diagnóstico genérico.
+    # Con esto, las alertas de desconexión distinguen "corte de luz" de
+    # "se cayó la nube". Preferimos identificar al BAW por su MAC (fija)
+    # porque el router le cambia la IP por DHCP. BAW_LAN_IP queda como
+    # pista inicial opcional. Sin MAC ni IP, el watcher sigue
+    # funcionando con el diagnóstico genérico.
     lan_probe_fn = None
+    baw_lan_mac = _env("BAW_LAN_MAC")
     baw_lan_ip = _env("BAW_LAN_IP")
-    if baw_lan_ip:
+    if baw_lan_mac:
+        locator = BAWLocator(mac=baw_lan_mac, ip_conocida=baw_lan_ip or None)
+        lan_probe_fn = locator.esta_vivo
+        log.info("Chequeo LAN habilitado — BAW por MAC %s", baw_lan_mac)
+    elif baw_lan_ip:
         lan_probe_fn = lambda: baw_responde_en_lan(baw_lan_ip)  # noqa: E731
-        log.info("Chequeo LAN habilitado contra %s", baw_lan_ip)
+        log.info("Chequeo LAN habilitado — BAW por IP fija %s", baw_lan_ip)
     else:
-        log.warning("Sin BAW_LAN_IP — las alertas de desconexión no "
-                    "podrán distinguir corte de luz de caída de la nube")
+        log.warning("Sin BAW_LAN_MAC ni BAW_LAN_IP — las alertas de "
+                    "desconexión no podrán distinguir corte de luz de "
+                    "caída de la nube")
 
     # ── Watcher ───────────────────────────────────────────────────
     poll_s = float(_env("POLL_INTERVAL_S", "5"))
