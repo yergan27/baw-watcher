@@ -145,11 +145,12 @@ class TestWatcher:
         assert "Recuperado" in cap.sent[1][0]
 
     def test_offline_blip_corto_no_dispara_alertas(self):
-        # Default threshold = 6 ticks. 5 ticks offline = blip transitorio.
+        # threshold = 6 ticks. 5 ticks offline = blip transitorio.
         cap = _CapturingNotifier()
         w = Watcher(
             fetch_fn=lambda: _state(online=False, error="cloud timeout"),
             notifier=cap, poll_interval_s=0,
+            offline_alert_after_ticks=6,
         )
         for _ in range(5):
             w.tick()
@@ -229,6 +230,7 @@ class TestWatcher:
         w = Watcher(
             fetch_fn=lambda: next(it),
             notifier=cap, poll_interval_s=0,
+            offline_alert_after_ticks=6,
         )
         for _ in range(4):
             w.tick()
@@ -259,6 +261,114 @@ class TestWatcher:
         w = Watcher(fetch_fn=lambda: s, notifier=cap, poll_interval_s=0)
         w.tick()
         assert cap.sent == []
+
+
+# ── Diagnóstico de desconexión con chequeo LAN ───────────────────────
+
+class TestOfflineDiagnostico:
+    def test_lan_viva_avisa_que_no_es_corte_de_luz(self):
+        # El BAW responde por LAN → la alerta dice que NO es corte.
+        cap = _CapturingNotifier()
+        w = Watcher(
+            fetch_fn=lambda: _state(online=False, error="cloud timeout"),
+            notifier=cap, poll_interval_s=0,
+            offline_alert_after_ticks=2,
+            lan_probe_fn=lambda: True,
+        )
+        w.tick(); w.tick()
+        assert len(cap.sent) == 1
+        titulo, cuerpo = cap.sent[0]
+        assert "nube" in titulo.lower()
+        assert "no parece un corte de luz" in cuerpo.lower()
+
+    def test_lan_muerta_avisa_posible_corte_de_luz(self):
+        # El BAW no responde ni por LAN → posible corte de luz.
+        cap = _CapturingNotifier()
+        w = Watcher(
+            fetch_fn=lambda: _state(online=False),
+            notifier=cap, poll_interval_s=0,
+            offline_alert_after_ticks=2,
+            lan_probe_fn=lambda: False,
+        )
+        w.tick(); w.tick()
+        assert "corte de luz" in cap.sent[0][0].lower()
+
+    def test_sin_chequeo_lan_usa_mensaje_generico(self):
+        cap = _CapturingNotifier()
+        w = Watcher(
+            fetch_fn=lambda: _state(online=False),
+            notifier=cap, poll_interval_s=0,
+            offline_alert_after_ticks=2,
+        )
+        w.tick(); w.tick()
+        assert "BAW sin respuesta" in cap.sent[0][0]
+
+    def test_probe_lan_que_falla_no_rompe_la_alerta(self):
+        # Si el chequeo LAN levanta excepción, igual sale la alerta.
+        cap = _CapturingNotifier()
+
+        def probe_roto():
+            raise OSError("interfaz caída")
+
+        w = Watcher(
+            fetch_fn=lambda: _state(online=False),
+            notifier=cap, poll_interval_s=0,
+            offline_alert_after_ticks=2,
+            lan_probe_fn=probe_roto,
+        )
+        w.tick(); w.tick()
+        assert len(cap.sent) == 1
+
+
+# ── Historial y comando /estado ──────────────────────────────────────
+
+class TestHistorialYEstado:
+    def test_fault_se_registra_en_historial(self, tmp_path):
+        from history import HistoryStore
+        h = HistoryStore(str(tmp_path / "h.db"))
+        cap = _CapturingNotifier()
+        w = Watcher(fetch_fn=lambda: _state(bitmap=1 << 13),
+                    notifier=cap, poll_interval_s=0, history=h)
+        w.tick()
+        ev = h.recent()
+        assert len(ev) == 1
+        assert ev[0]["kind"] == "alarma"
+
+    def test_offline_se_registra_una_sola_vez(self, tmp_path):
+        from history import HistoryStore
+        h = HistoryStore(str(tmp_path / "h.db"))
+        cap = _CapturingNotifier()
+        w = Watcher(fetch_fn=lambda: _state(online=False),
+                    notifier=cap, poll_interval_s=0,
+                    offline_alert_after_ticks=2, history=h)
+        for _ in range(10):
+            w.tick()
+        offline = [e for e in h.recent() if e["kind"] == "offline"]
+        assert len(offline) == 1
+
+    def test_estado_texto_sin_lecturas(self):
+        w = Watcher(fetch_fn=lambda: _state(), notifier=_CapturingNotifier(),
+                    poll_interval_s=0)
+        assert "todavía no" in w.estado_texto().lower()
+
+    def test_estado_texto_online_muestra_las_fases(self):
+        cap = _CapturingNotifier()
+        w = Watcher(fetch_fn=lambda: _state(bitmap=0), notifier=cap,
+                    poll_interval_s=0)
+        w.tick()
+        txt = w.estado_texto()
+        assert "Fase R" in txt and "Fase S" in txt and "Fase T" in txt
+
+    def test_estado_texto_offline_muestra_ultima_lectura(self):
+        # Primero online (guarda lectura), después offline.
+        cap = _CapturingNotifier()
+        seq = iter([_state(bitmap=0), _state(online=False)])
+        w = Watcher(fetch_fn=lambda: next(seq), notifier=cap,
+                    poll_interval_s=0, offline_alert_after_ticks=99)
+        w.tick(); w.tick()
+        txt = w.estado_texto()
+        assert "no está reportando" in txt.lower()
+        assert "última lectura conocida" in txt.lower()
 
 
 # ── MultiNotifier ─────────────────────────────────────────────────────

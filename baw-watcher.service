@@ -13,7 +13,11 @@ Restart=on-failure
 RestartSec=10
 # El daemon corre con --tag para que journalctl --grep funcione fácil.
 SyslogIdentifier=baw-watcher
-# Endurecimientos básicos — el watcher no escribe a disco salvo logs.
+# StateDirectory crea /var/lib/baw-watcher (escribible para el servicio
+# aun con ProtectSystem=strict) y exporta STATE_DIRECTORY. Ahí vive la
+# DB del historial de eventos.
+StateDirectory=baw-watcher
+# Endurecimientos básicos — el watcher solo escribe en StateDirectory.
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict

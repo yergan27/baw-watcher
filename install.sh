@@ -43,9 +43,18 @@ WA_TOKEN=
 WA_PHONE_ID=
 WA_ALERT_NUMBERS=
 
+# Red local — IP del BAW en la LAN del negocio. Con esto, las alertas
+# de desconexión distinguen "corte de luz" (el BAW tampoco responde
+# local) de "se cayó la nube" (el BAW sí responde local). Vacío =
+# diagnóstico genérico.
+BAW_LAN_IP=192.168.100.84
+
 # Tuning
 POLL_INTERVAL_S=5
 REPEAT_AFTER_S=1800
+# Ticks consecutivos sin respuesta antes de alertar desconexión.
+# Con POLL_INTERVAL_S=5, 3 ticks ≈ 15 s.
+OFFLINE_ALERT_AFTER_TICKS=3
 LOG_LEVEL=INFO
 EOF
     chmod 0640 /etc/baw-watcher/baw-watcher.env
