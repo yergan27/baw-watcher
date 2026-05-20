@@ -43,11 +43,12 @@ WA_TOKEN=
 WA_PHONE_ID=
 WA_ALERT_NUMBERS=
 
-# Red local — IP del BAW en la LAN del negocio. Con esto, las alertas
-# de desconexión distinguen "corte de luz" (el BAW tampoco responde
-# local) de "se cayó la nube" (el BAW sí responde local). Vacío =
-# diagnóstico genérico.
-BAW_LAN_IP=192.168.100.84
+# Red local — para distinguir "corte de luz" de "se cayó la nube" en
+# las alertas de desconexión. Se identifica al BAW por su MAC (fija);
+# así, aunque el router le cambie la IP por DHCP, el watcher lo
+# encuentra igual. BAW_LAN_IP es solo una pista inicial opcional.
+BAW_LAN_MAC=80:64:7C:9D:26:63
+BAW_LAN_IP=
 
 # Tuning
 POLL_INTERVAL_S=5
