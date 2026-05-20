@@ -1,0 +1,23 @@
+[Unit]
+Description=BAW monitor watcher — vigila el monitor trifásico BAW y alerta por Telegram/WhatsApp ante faults críticos
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=peppygate
+WorkingDirectory=/home/peppygate/baw-watcher
+EnvironmentFile=/etc/baw-watcher/baw-watcher.env
+ExecStart=/usr/bin/python3 /home/peppygate/baw-watcher/src/main.py
+Restart=on-failure
+RestartSec=10
+# El daemon corre con --tag para que journalctl --grep funcione fácil.
+SyslogIdentifier=baw-watcher
+# Endurecimientos básicos — el watcher no escribe a disco salvo logs.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+
+[Install]
+WantedBy=multi-user.target

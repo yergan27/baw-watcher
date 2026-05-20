@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+# Secretos y datos locales — nunca al repo.
+*.env
+.env
+*.db
