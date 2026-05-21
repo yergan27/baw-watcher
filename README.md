@@ -12,11 +12,16 @@ de peppysoft: alerta aunque la PC del negocio esté apagada.
 - Polea el BAW por la **nube de Tuya** cada pocos segundos.
 - Alerta ante **faults críticos** (corte, sobre/subtensión, fuga,
   sobrecorriente, sobrecalentamiento, etc.).
-- Detecta cuando el BAW **deja de reportar**. Si hay MAC del BAW
-  configurada, lo ubica en la red local por su MAC (aunque DHCP le
-  haya cambiado la IP) y distingue entre *corte de luz* (el BAW
-  tampoco responde local) y *caída de la conexión a la nube* (el BAW
-  sí responde local — tiene luz y WiFi).
+- Detecta cuando el BAW **deja de reportar** y distingue de quién es
+  el problema:
+  - *corte de luz* — el BAW no responde ni por la nube ni por la red
+    local (lo ubica en la LAN por su MAC, aunque DHCP le haya cambiado
+    la IP);
+  - *caída de la nube del BAW* — el BAW sí responde local (tiene luz y
+    WiFi) pero perdió la nube de Tuya;
+  - *caída de la conexión de peppygate* — es peppygate el que se quedó
+    sin internet o sin DNS. No es un problema del BAW ni eléctrico; se
+    avisa como tal, y solo si la caída dura más que un parpadeo.
 - Guarda un **historial de eventos** y responde comandos por Telegram
   (`/estado`, `/historial`).
 
@@ -27,6 +32,7 @@ src/
 ├── baw_state.py    parser de DPs del BAW + catálogo de faults
 ├── tuya_cloud.py   cliente Tuya Cloud (firma HMAC, stdlib)
 ├── lan_probe.py    ubica al BAW en la LAN por su MAC (resiste DHCP)
+├── net_probe.py    chequea si peppygate tiene internet (por IP, sin DNS)
 ├── notifier.py     canales de alerta (Telegram, WhatsApp, multi)
 ├── history.py      persistencia de eventos en SQLite
 ├── commands.py     bot de Telegram que responde /estado y /historial

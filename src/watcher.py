@@ -5,9 +5,11 @@ Corre como systemd unit en peppygate (Debian) — un loop infinito que:
   1. Polea el BAW por la nube de Tuya cada pocos segundos.
   2. Detecta transiciones de los bits "críticos" del DP fault (corte,
      sobre/subtensión, fuga, sobrecorriente, sobrecalentamiento, etc.).
-  3. Detecta cuando el BAW deja de reportar. Si hay chequeo LAN
-     configurado, distingue corte de luz (el BAW tampoco responde
-     local) de caída de la nube (el BAW sí responde local).
+  3. Detecta cuando el BAW deja de reportar. Distingue tres casos:
+     corte de luz (el BAW no responde ni por nube ni por LAN), caída
+     de la nube del BAW (el BAW sí responde local), y caída de la
+     conexión de peppygate (DNS/internet de peppygate caído — no es un
+     problema del BAW).
   4. Dispara alertas multi-canal (Telegram + WhatsApp) cuando algo
      pasa, y otra cuando se normaliza ("recuperado").
   5. Aplica debounce: una alerta por evento por ventana de re-aviso,
@@ -29,6 +31,27 @@ from baw_state import BAWState, FAULT_BITS, CRITICAL_FAULT_BITS, parse_state
 from notifier import Notifier
 
 log = logging.getLogger(__name__)
+
+
+# Señales en el texto de error de que el problema es la CONEXIÓN de
+# peppygate (DNS caído) — no el BAW ni la nube de Tuya. El caso típico:
+# "<urlopen error [Errno -3] Temporary failure in name resolution>".
+_SENALES_FALLA_CONEXION_LOCAL = (
+    "name resolution",
+    "name or service not known",
+    "[errno -2]",
+    "[errno -3]",
+    "getaddrinfo",
+)
+
+
+def _es_falla_de_conexion_local(error: str | None) -> bool:
+    """True si el texto de error indica que peppygate no pudo resolver
+    DNS — o sea, el problema es la conexión de peppygate, no el BAW."""
+    if not error:
+        return False
+    e = error.lower()
+    return any(s in e for s in _SENALES_FALLA_CONEXION_LOCAL)
 
 
 # ── Detector con debounce ─────────────────────────────────────────────
@@ -208,6 +231,77 @@ def _mensaje_offline_recuperado(state: BAWState,
     return titulo, cuerpo
 
 
+def _mensaje_sin_internet(state: BAWState, first_seen_at: float,
+                          notify_count: int, lan_alive: bool | None,
+                          internet_ok: bool | None) -> tuple[str, str]:
+    """Alerta de que la CONEXIÓN de peppygate falló — no el BAW.
+
+    Esto pasa cuando peppygate no puede consultar la nube de Tuya por un
+    problema propio de peppygate: se le cayó internet, o (lo más común)
+    se le cayó el DNS y no puede resolver nombres. El BAW no tiene nada
+    que ver y, casi seguro, está funcionando perfecto.
+
+      - `internet_ok is False` → peppygate sin salida a internet.
+      - en otro caso → hay internet pero falló la resolución de nombres
+        (DNS). Igual: es la conexión de peppygate.
+      - `lan_alive` confirma el estado del BAW por la red local.
+    """
+    dur_s = state.fetched_at.timestamp() - first_seen_at
+    mins = int(dur_s // 60)
+    secs = int(dur_s % 60)
+    rec = f" (recordatorio #{notify_count})" if notify_count > 1 else ""
+
+    if internet_ok is False:
+        causa = "peppygate se quedó sin internet"
+    else:
+        causa = ("peppygate no puede resolver direcciones de internet "
+                 "(falla de DNS)")
+
+    if lan_alive is True:
+        detalle_baw = (
+            "El BAW SÍ responde en la red local: tiene luz y está "
+            "funcionando — no es un problema eléctrico."
+        )
+    elif lan_alive is False:
+        detalle_baw = (
+            "Mientras dure, peppygate tampoco ve el BAW en la red local, "
+            "así que no se puede verificar su estado."
+        )
+    else:
+        detalle_baw = (
+            "El BAW casi seguro está bien — el problema es la conexión "
+            "de peppygate, no el monitor."
+        )
+
+    titulo = f"📶 Sin conexión en peppygate{rec}"
+    cuerpo = (
+        f"NO es un problema del BAW ni de la luz: {causa}.\n"
+        f"El watcher no puede consultar la nube de Tuya hasta que la "
+        f"conexión de peppygate vuelva.\n"
+        f"{detalle_baw}\n"
+        f"Tiempo sin conexión: {mins} min {secs} s\n"
+        f"Detalle técnico: {state.error or 'sin info'}\n"
+        f"Hora: {state.fetched_at.strftime('%H:%M:%S')}"
+    )
+    return titulo, cuerpo
+
+
+def _mensaje_internet_recuperado(state: BAWState,
+                                  duracion_s: float) -> tuple[str, str]:
+    mins = int(duracion_s // 60)
+    secs = int(duracion_s % 60)
+    titulo = "📶 Conexión de peppygate restablecida"
+    cuerpo = (
+        f"peppygate recuperó la conexión y el watcher volvió a consultar "
+        f"la nube del BAW.\n"
+        f"Tiempo sin conexión: {mins} min {secs} s\n"
+        f"El BAW no tuvo ningún problema — fue solo la conexión de "
+        f"peppygate.\n"
+        f"Hora de recuperación: {state.fetched_at.strftime('%H:%M:%S')}"
+    )
+    return titulo, cuerpo
+
+
 # ── Loop principal ────────────────────────────────────────────────────
 
 class Watcher:
@@ -222,10 +316,19 @@ class Watcher:
                  repeat_after_s: float = 30 * 60,
                  offline_alert_after_ticks: int = 3,
                  lan_probe_fn: Callable[[], bool] | None = None,
+                 internet_probe_fn: Callable[[], bool] | None = None,
+                 internet_alert_after_s: float = 120.0,
                  history=None):
         """`lan_probe_fn` (opcional): callable que devuelve True si el
         BAW responde en la red local. Si se pasa, las alertas de
         desconexión distinguen 'corte de luz' de 'se cayó la nube'.
+        `internet_probe_fn` (opcional): callable que devuelve True si
+        peppygate tiene salida a internet. Si se pasa, el watcher
+        distingue "el BAW perdió la nube" de "peppygate se quedó sin
+        conexión" — un problema de peppygate, no del BAW.
+        `internet_alert_after_s`: una caída de la conexión de peppygate
+        recién genera alerta si dura más que esto (los parpadeos cortos
+        de internet/DNS son ruido y el BAW está bien igual).
         `history` (opcional): un HistoryStore donde registrar eventos
         para el comando /historial.
         """
@@ -235,6 +338,8 @@ class Watcher:
         self.repeat_after_s = repeat_after_s
         self.offline_alert_after_ticks = max(1, int(offline_alert_after_ticks))
         self.lan_probe_fn = lan_probe_fn
+        self.internet_probe_fn = internet_probe_fn
+        self.internet_alert_after_s = max(0.0, float(internet_alert_after_s))
         self.history = history
         self.tracker = FaultTracker(repeat_after_s=repeat_after_s)
         self._stop = False
@@ -243,6 +348,10 @@ class Watcher:
         self._offline_first_seen_at: float | None = None
         self._offline_last_notified_at: float | None = None
         self._offline_notify_count = 0
+        # Tipo del incidente offline en curso ("sin_internet" = problema
+        # de conexión de peppygate; "baw" = el BAW dejó de reportar).
+        # Define cómo se redacta el mensaje de recuperación.
+        self._offline_kind: str | None = None
         # Última lectura vista (para el comando /estado) y última que
         # estuvo online (para mostrar datos aunque ahora esté caído).
         self.last_state: BAWState | None = None
@@ -261,6 +370,18 @@ class Watcher:
             return bool(self.lan_probe_fn())
         except Exception:
             log.exception("watcher: chequeo LAN falló")
+            return None
+
+    def _probe_internet(self) -> bool | None:
+        """¿peppygate tiene salida a internet? True/False si hay chequeo
+        configurado, None si no hay chequeo o si el chequeo mismo falló.
+        Nunca propaga excepciones."""
+        if self.internet_probe_fn is None:
+            return None
+        try:
+            return bool(self.internet_probe_fn())
+        except Exception:
+            log.exception("watcher: chequeo de internet falló")
             return None
 
     def _registrar(self, kind: str, titulo: str, cuerpo: str,
@@ -297,6 +418,24 @@ class Watcher:
         if self._consecutive_offline < self.offline_alert_after_ticks:
             return
 
+        # ¿De quién es el problema? Si el error es una falla de DNS, ya
+        # sabemos que es la conexión de peppygate (y nos ahorramos el
+        # chequeo de internet). Si no, recién ahí lo verificamos.
+        if _es_falla_de_conexion_local(state.error):
+            es_peppygate = True
+            internet_ok: bool | None = None
+        else:
+            internet_ok = self._probe_internet()
+            es_peppygate = internet_ok is False
+
+        # Las caídas de conexión de peppygate tienen mecha más larga: un
+        # parpadeo corto de internet/DNS es ruido y el BAW está bien
+        # igual. Solo avisamos si la conexión sigue caída un buen rato.
+        if es_peppygate:
+            dur = now - (self._offline_first_seen_at or now)
+            if dur < self.internet_alert_after_s:
+                return
+
         primera = self._offline_last_notified_at is None
         if primera:
             self._offline_notify_count = 1
@@ -306,19 +445,32 @@ class Watcher:
             return  # ya alertamos y todavía no pasó la ventana de repaso
 
         # Recién ahora chequeamos la LAN: solo cuando vamos a notificar,
-        # no en cada tick offline. Eso dice si es corte de luz o solo
-        # se cayó la nube.
+        # no en cada tick offline.
         lan_alive = self._probe_lan()
-        titulo, cuerpo = _mensaje_offline(
-            state, self._offline_first_seen_at,
-            self._offline_notify_count, lan_alive,
-        )
-        log.warning("ALARMA OFFLINE #%d tras %d ticks (lan_alive=%s)",
-                    self._offline_notify_count,
-                    self._consecutive_offline, lan_alive)
+        if es_peppygate:
+            self._offline_kind = "sin_internet"
+            titulo, cuerpo = _mensaje_sin_internet(
+                state, self._offline_first_seen_at,
+                self._offline_notify_count, lan_alive, internet_ok,
+            )
+            log.warning("ALARMA SIN-INTERNET #%d tras %d ticks "
+                        "(internet_ok=%s lan_alive=%s)",
+                        self._offline_notify_count,
+                        self._consecutive_offline, internet_ok, lan_alive)
+            history_kind = "sin_internet"
+        else:
+            self._offline_kind = "baw"
+            titulo, cuerpo = _mensaje_offline(
+                state, self._offline_first_seen_at,
+                self._offline_notify_count, lan_alive,
+            )
+            log.warning("ALARMA OFFLINE #%d tras %d ticks (lan_alive=%s)",
+                        self._offline_notify_count,
+                        self._consecutive_offline, lan_alive)
+            history_kind = "offline"
         self.notifier.send(titulo, cuerpo)
         if primera:
-            self._registrar("offline", titulo, cuerpo, now)
+            self._registrar(history_kind, titulo, cuerpo, now)
         self._offline_last_notified_at = now
 
     def _handle_recovered_from_offline(self, state: BAWState,
@@ -326,17 +478,26 @@ class Watcher:
         if self._consecutive_offline == 0:
             return
         alerta_emitida = self._offline_last_notified_at is not None
-        log.info("BAW back online tras %d ticks offline (alerta_emitida=%s)",
-                 self._consecutive_offline, alerta_emitida)
+        log.info("BAW back online tras %d ticks offline "
+                 "(alerta_emitida=%s kind=%s)",
+                 self._consecutive_offline, alerta_emitida,
+                 self._offline_kind)
         if alerta_emitida:
             duracion_s = now - (self._offline_first_seen_at or now)
-            titulo, cuerpo = _mensaje_offline_recuperado(state, duracion_s)
+            if self._offline_kind == "sin_internet":
+                titulo, cuerpo = _mensaje_internet_recuperado(
+                    state, duracion_s)
+                self._registrar("internet_ok", titulo, cuerpo, now)
+            else:
+                titulo, cuerpo = _mensaje_offline_recuperado(
+                    state, duracion_s)
+                self._registrar("reconectado", titulo, cuerpo, now)
             self.notifier.send(titulo, cuerpo)
-            self._registrar("reconectado", titulo, cuerpo, now)
         self._consecutive_offline = 0
         self._offline_first_seen_at = None
         self._offline_last_notified_at = None
         self._offline_notify_count = 0
+        self._offline_kind = None
 
     def tick(self) -> BAWState:
         """Una iteración del loop. Expuesto para tests."""
