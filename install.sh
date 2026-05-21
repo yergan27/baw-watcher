@@ -56,6 +56,10 @@ REPEAT_AFTER_S=1800
 # Ticks consecutivos sin respuesta antes de alertar desconexión.
 # Con POLL_INTERVAL_S=5, 3 ticks ≈ 15 s.
 OFFLINE_ALERT_AFTER_TICKS=3
+# Segundos que tiene que durar una caída de la conexión de peppygate
+# (DNS/internet) antes de avisar. Los parpadeos cortos son ruido y el
+# BAW está bien igual, así que no generan alerta. Default 120 (2 min).
+INTERNET_ALERT_AFTER_S=120
 LOG_LEVEL=INFO
 EOF
     chmod 0640 /etc/baw-watcher/baw-watcher.env

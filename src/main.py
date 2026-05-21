@@ -15,6 +15,7 @@ import sys
 from commands import TelegramCommandBot
 from history import HistoryStore
 from lan_probe import BAWLocator, baw_responde_en_lan
+from net_probe import hay_internet
 from notifier import MultiNotifier, TelegramNotifier, WhatsAppNotifier
 from tuya_cloud import TuyaCloudClient
 from watcher import Watcher
@@ -108,10 +109,19 @@ def main():
                     "desconexión no podrán distinguir corte de luz de "
                     "caída de la nube")
 
+    # ── Chequeo de internet de peppygate ──────────────────────────
+    # Distingue "el BAW perdió la nube" de "peppygate se quedó sin
+    # conexión". Si es lo segundo, no es un problema del BAW ni de la
+    # luz — y no hay que alarmar al dueño como si lo fuera. Es un
+    # chequeo por IP fija (sin DNS), siempre disponible — no necesita
+    # configuración.
+    log.info("Chequeo de internet habilitado (IPs públicas, sin DNS)")
+
     # ── Watcher ───────────────────────────────────────────────────
     poll_s = float(_env("POLL_INTERVAL_S", "5"))
     repeat_s = float(_env("REPEAT_AFTER_S", str(30 * 60)))
     offline_after = int(_env("OFFLINE_ALERT_AFTER_TICKS", "3"))
+    internet_after_s = float(_env("INTERNET_ALERT_AFTER_S", "120"))
     watcher = Watcher(
         fetch_fn=client.fetch_state,
         notifier=notifier,
@@ -119,6 +129,8 @@ def main():
         repeat_after_s=repeat_s,
         offline_alert_after_ticks=offline_after,
         lan_probe_fn=lan_probe_fn,
+        internet_probe_fn=hay_internet,
+        internet_alert_after_s=internet_after_s,
         history=history,
     )
 

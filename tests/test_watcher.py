@@ -392,3 +392,179 @@ class TestMultiNotifier:
         m = MultiNotifier(channels=[bad, good])
         assert m.send("t", "c") is True
         good.send.assert_called_once()
+
+
+# ── Conexión de peppygate caída (DNS / internet) ─────────────────────
+#
+# Distinto de "el BAW se cayó": acá el que perdió conexión es peppygate.
+# No es un problema del BAW ni eléctrico, y el aviso tiene que decir eso.
+
+_ERROR_DNS = ("cloud: <urlopen error [Errno -3] Temporary failure in "
+              "name resolution>")
+
+
+class TestDeteccionFallaLocal:
+    def test_error_de_dns_se_detecta_como_falla_local(self):
+        from watcher import _es_falla_de_conexion_local
+        assert _es_falla_de_conexion_local(_ERROR_DNS)
+        assert _es_falla_de_conexion_local(
+            "cloud: <urlopen error [Errno -2] Name or service not known>")
+
+    def test_error_de_nube_normal_no_es_falla_local(self):
+        from watcher import _es_falla_de_conexion_local
+        assert not _es_falla_de_conexion_local("cloud timeout")
+        assert not _es_falla_de_conexion_local(
+            "device.online=false (BAW desconectado de la nube)")
+
+    def test_error_none_no_es_falla_local(self):
+        from watcher import _es_falla_de_conexion_local
+        assert not _es_falla_de_conexion_local(None)
+
+
+class TestSinInternet:
+    def test_falla_dns_sostenida_avisa_problema_de_peppygate(self):
+        # DNS caído de peppygate, sostenido más que internet_alert_after_s:
+        # la alerta tiene que apuntar a peppygate, NO al BAW.
+        cap = _CapturingNotifier()
+        base = 1_700_000_000.0
+        states = [_state(online=False, ts=base + 5 * i, error=_ERROR_DNS)
+                  for i in range(12)]
+        it = iter(states)
+        w = Watcher(
+            fetch_fn=lambda: next(it),
+            notifier=cap, poll_interval_s=0,
+            offline_alert_after_ticks=3,
+            internet_alert_after_s=30.0,
+            repeat_after_s=100000.0,
+            lan_probe_fn=lambda: True,
+        )
+        for _ in range(12):
+            w.tick()
+        assert len(cap.sent) == 1
+        titulo, cuerpo = cap.sent[0]
+        assert "peppygate" in titulo.lower()
+        assert "dns" in cuerpo.lower()
+        assert "no es un problema del baw" in cuerpo.lower()
+
+    def test_blip_corto_de_dns_no_genera_alerta(self):
+        # Caída de DNS por debajo de internet_alert_after_s = ruido,
+        # no se notifica nada (ni el aviso ni la recuperación).
+        cap = _CapturingNotifier()
+        base = 1_700_000_000.0
+        seq = ([_state(online=False, ts=base + 5 * i, error=_ERROR_DNS)
+                for i in range(4)]
+               + [_state(online=True, bitmap=0, ts=base + 25)])
+        it = iter(seq)
+        w = Watcher(
+            fetch_fn=lambda: next(it),
+            notifier=cap, poll_interval_s=0,
+            offline_alert_after_ticks=3,
+            internet_alert_after_s=60.0,
+            lan_probe_fn=lambda: True,
+        )
+        for _ in range(5):
+            w.tick()
+        assert cap.sent == []
+
+    def test_recuperacion_de_sin_internet_avisa_que_volvio(self):
+        cap = _CapturingNotifier()
+        base = 1_700_000_000.0
+        seq = ([_state(online=False, ts=base + 5 * i, error=_ERROR_DNS)
+                for i in range(12)]
+               + [_state(online=True, bitmap=0, ts=base + 300)])
+        it = iter(seq)
+        w = Watcher(
+            fetch_fn=lambda: next(it),
+            notifier=cap, poll_interval_s=0,
+            offline_alert_after_ticks=3,
+            internet_alert_after_s=30.0,
+            repeat_after_s=100000.0,
+            lan_probe_fn=lambda: True,
+        )
+        for _ in range(13):
+            w.tick()
+        assert len(cap.sent) == 2
+        assert "peppygate" in cap.sent[0][0].lower()
+        assert "restablecida" in cap.sent[1][0].lower()
+        assert "no tuvo ningún problema" in cap.sent[1][1].lower()
+
+    def test_internet_caido_lo_detecta_el_probe(self):
+        # El error NO es de DNS, pero el chequeo de internet dice que
+        # peppygate no tiene salida → igual es problema de peppygate.
+        cap = _CapturingNotifier()
+        base = 1_700_000_000.0
+        err = "cloud: <urlopen error [Errno 101] Network is unreachable>"
+        states = [_state(online=False, ts=base + 5 * i, error=err)
+                  for i in range(12)]
+        it = iter(states)
+        w = Watcher(
+            fetch_fn=lambda: next(it),
+            notifier=cap, poll_interval_s=0,
+            offline_alert_after_ticks=3,
+            internet_alert_after_s=30.0,
+            repeat_after_s=100000.0,
+            internet_probe_fn=lambda: False,
+            lan_probe_fn=lambda: True,
+        )
+        for _ in range(12):
+            w.tick()
+        assert len(cap.sent) == 1
+        titulo, cuerpo = cap.sent[0]
+        assert "peppygate" in titulo.lower()
+        assert "sin internet" in cuerpo.lower()
+
+    def test_con_internet_ok_y_baw_mudo_avisa_corte_de_luz(self):
+        # peppygate tiene internet pero el BAW no responde ni local:
+        # NO es problema de peppygate — es un corte de luz de verdad.
+        cap = _CapturingNotifier()
+        w = Watcher(
+            fetch_fn=lambda: _state(online=False, error="cloud timeout"),
+            notifier=cap, poll_interval_s=0,
+            offline_alert_after_ticks=2,
+            internet_probe_fn=lambda: True,
+            lan_probe_fn=lambda: False,
+        )
+        w.tick(); w.tick()
+        assert len(cap.sent) == 1
+        assert "corte de luz" in cap.sent[0][0].lower()
+
+    def test_internet_probe_roto_no_rompe_la_alerta(self):
+        # Si el chequeo de internet levanta excepción, el watcher cae
+        # con elegancia al diagnóstico del lado del BAW.
+        cap = _CapturingNotifier()
+
+        def probe_roto():
+            raise OSError("socket caído")
+
+        w = Watcher(
+            fetch_fn=lambda: _state(online=False, error="cloud timeout"),
+            notifier=cap, poll_interval_s=0,
+            offline_alert_after_ticks=2,
+            internet_probe_fn=probe_roto,
+            lan_probe_fn=lambda: False,
+        )
+        w.tick(); w.tick()
+        assert len(cap.sent) == 1
+        assert "corte de luz" in cap.sent[0][0].lower()
+
+    def test_sin_internet_se_registra_en_historial(self, tmp_path):
+        from history import HistoryStore
+        h = HistoryStore(str(tmp_path / "h.db"))
+        cap = _CapturingNotifier()
+        base = 1_700_000_000.0
+        states = [_state(online=False, ts=base + 5 * i, error=_ERROR_DNS)
+                  for i in range(12)]
+        it = iter(states)
+        w = Watcher(
+            fetch_fn=lambda: next(it),
+            notifier=cap, poll_interval_s=0,
+            offline_alert_after_ticks=3,
+            internet_alert_after_s=30.0,
+            repeat_after_s=100000.0,
+            lan_probe_fn=lambda: True,
+            history=h,
+        )
+        for _ in range(12):
+            w.tick()
+        sin_internet = [e for e in h.recent() if e["kind"] == "sin_internet"]
+        assert len(sin_internet) == 1
