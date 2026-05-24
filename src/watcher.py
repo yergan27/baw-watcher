@@ -122,18 +122,28 @@ def _mensaje_alarma(state: BAWState, fault: FaultEvent) -> tuple[str, str]:
     titulo = f"⚠️ {fault.name}"
     if fault.notify_count > 1:
         titulo += f" (recordatorio #{fault.notify_count})"
-    cuerpo = (
-        f"BAW reportó: {fault.name}\n"
-        f"Fase R: {state.phase_a.voltage:.0f}V {state.phase_a.current:.1f}A "
-        f"{state.phase_a.power:.0f}W\n"
-        f"Fase S: {state.phase_b.voltage:.0f}V {state.phase_b.current:.1f}A "
-        f"{state.phase_b.power:.0f}W\n"
-        f"Fase T: {state.phase_c.voltage:.0f}V {state.phase_c.current:.1f}A "
-        f"{state.phase_c.power:.0f}W\n"
-        f"Total: {state.total_power:.0f}W\n"
-        f"Hora: {state.fetched_at.strftime('%H:%M:%S')}"
-    )
-    return titulo, cuerpo
+    lineas = [f"BAW reportó: {fault.name}"]
+    # Por LAN el firmware del BAW no publica los DPs de fase (V/A/W) —
+    # quedan en 0. Si vinieron por algún otro camino (cloud), los
+    # mostramos; si no, omitimos para no mandar "Fase R: 0V 0A 0W".
+    hay_fases = (state.phase_a.voltage > 0 or state.phase_b.voltage > 0
+                 or state.phase_c.voltage > 0)
+    if hay_fases:
+        lineas += [
+            f"Fase R: {state.phase_a.voltage:.0f}V "
+            f"{state.phase_a.current:.1f}A {state.phase_a.power:.0f}W",
+            f"Fase S: {state.phase_b.voltage:.0f}V "
+            f"{state.phase_b.current:.1f}A {state.phase_b.power:.0f}W",
+            f"Fase T: {state.phase_c.voltage:.0f}V "
+            f"{state.phase_c.current:.1f}A {state.phase_c.power:.0f}W",
+            f"Total: {state.total_power:.0f}W",
+        ]
+    if state.temp_c:
+        lineas.append(f"Temperatura interna: {state.temp_c:.0f} °C")
+    if state.leakage_ma:
+        lineas.append(f"Fuga: {state.leakage_ma:.0f} mA")
+    lineas.append(f"Hora: {state.fetched_at.strftime('%H:%M:%S')}")
+    return titulo, "\n".join(lineas)
 
 
 def _mensaje_recuperado(state: BAWState, fault: FaultEvent) -> tuple[str, str]:
@@ -203,19 +213,28 @@ def _fmt_estado(state: BAWState, encabezado: str) -> str:
     """Lectura del BAW formateada para el comando /estado."""
     faults = (f"Faults activos: {', '.join(state.faults)}"
               if state.faults else "Sin faults activos.")
-    return (
-        f"{encabezado}\n"
-        f"Fase R: {state.phase_a.voltage:.0f} V · "
-        f"{state.phase_a.current:.1f} A · {state.phase_a.power:.0f} W\n"
-        f"Fase S: {state.phase_b.voltage:.0f} V · "
-        f"{state.phase_b.current:.1f} A · {state.phase_b.power:.0f} W\n"
-        f"Fase T: {state.phase_c.voltage:.0f} V · "
-        f"{state.phase_c.current:.1f} A · {state.phase_c.power:.0f} W\n"
-        f"Potencia total: {state.total_power:.0f} W\n"
-        f"Temperatura: {state.temp_c:.0f} °C\n"
-        f"{faults}\n"
-        f"Hora de la lectura: {state.fetched_at.strftime('%H:%M:%S')}"
-    )
+    lineas = [encabezado]
+    hay_fases = (state.phase_a.voltage > 0 or state.phase_b.voltage > 0
+                 or state.phase_c.voltage > 0)
+    if hay_fases:
+        lineas += [
+            f"Fase R: {state.phase_a.voltage:.0f} V · "
+            f"{state.phase_a.current:.1f} A · {state.phase_a.power:.0f} W",
+            f"Fase S: {state.phase_b.voltage:.0f} V · "
+            f"{state.phase_b.current:.1f} A · {state.phase_b.power:.0f} W",
+            f"Fase T: {state.phase_c.voltage:.0f} V · "
+            f"{state.phase_c.current:.1f} A · {state.phase_c.power:.0f} W",
+            f"Potencia total: {state.total_power:.0f} W",
+        ]
+    else:
+        lineas.append("Lecturas de fase (V/A/W) no disponibles por LAN.")
+    if state.total_energy_kwh:
+        lineas.append(f"Energía acumulada: {state.total_energy_kwh:.1f} kWh")
+    if state.temp_c:
+        lineas.append(f"Temperatura: {state.temp_c:.0f} °C")
+    lineas.append(faults)
+    lineas.append(f"Hora de la lectura: {state.fetched_at.strftime('%H:%M:%S')}")
+    return "\n".join(lineas)
 
 
 def _mensaje_offline_recuperado(state: BAWState,

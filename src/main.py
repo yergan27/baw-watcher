@@ -14,10 +14,10 @@ import sys
 
 from commands import TelegramCommandBot
 from history import HistoryStore
-from lan_probe import BAWLocator, baw_responde_en_lan
+from lan_probe import BAWLocator
 from net_probe import hay_internet
 from notifier import MultiNotifier, TelegramNotifier, WhatsAppNotifier
-from tuya_cloud import TuyaCloudClient
+from tuya_lan import TuyaLanClient
 from watcher import Watcher
 
 log = logging.getLogger("baw-watcher")
@@ -42,13 +42,21 @@ def main():
         format="%(asctime)s %(levelname)-7s %(name)s — %(message)s",
     )
 
-    # ── Tuya cloud (única fuente de datos) ─────────────────────────
-    client = TuyaCloudClient(
-        client_id=_env("TUYA_CLIENT_ID", required=True),
-        client_secret=_env("TUYA_CLIENT_SECRET", required=True),
+    # ── BAW por LAN (única fuente de datos) ────────────────────────
+    # Cloud-only era inviable: el Trial Edition del proyecto Tuya se
+    # agota y el endpoint empieza a devolver "Please upgrade to the
+    # official version". Por LAN, peppygate llega directo al BAW
+    # (misma red del negocio) y no depende de internet ni de cuotas.
+    baw_mac = _env("BAW_LAN_MAC", required=True)
+    baw_ip_hint = _env("BAW_LAN_IP") or None
+    locator = BAWLocator(mac=baw_mac, ip_conocida=baw_ip_hint)
+    client = TuyaLanClient(
         device_id=_env("TUYA_BAW_DEVICE_ID", required=True),
-        endpoint=_env("TUYA_ENDPOINT", "https://openapi.tuyaus.com"),
+        local_key=_env("TUYA_BAW_LOCAL_KEY", required=True),
+        locator=locator,
     )
+    log.info("Cliente BAW por LAN — MAC %s (IP inicial: %s)",
+             baw_mac, baw_ip_hint or "auto")
 
     # ── Notificadores ──────────────────────────────────────────────
     channels = []
@@ -89,25 +97,11 @@ def main():
     history = HistoryStore(history_path)
 
     # ── Chequeo del BAW en la red local ────────────────────────────
-    # Con esto, las alertas de desconexión distinguen "corte de luz" de
-    # "se cayó la nube". Preferimos identificar al BAW por su MAC (fija)
-    # porque el router le cambia la IP por DHCP. BAW_LAN_IP queda como
-    # pista inicial opcional. Sin MAC ni IP, el watcher sigue
-    # funcionando con el diagnóstico genérico.
-    lan_probe_fn = None
-    baw_lan_mac = _env("BAW_LAN_MAC")
-    baw_lan_ip = _env("BAW_LAN_IP")
-    if baw_lan_mac:
-        locator = BAWLocator(mac=baw_lan_mac, ip_conocida=baw_lan_ip or None)
-        lan_probe_fn = locator.esta_vivo
-        log.info("Chequeo LAN habilitado — BAW por MAC %s", baw_lan_mac)
-    elif baw_lan_ip:
-        lan_probe_fn = lambda: baw_responde_en_lan(baw_lan_ip)  # noqa: E731
-        log.info("Chequeo LAN habilitado — BAW por IP fija %s", baw_lan_ip)
-    else:
-        log.warning("Sin BAW_LAN_MAC ni BAW_LAN_IP — las alertas de "
-                    "desconexión no podrán distinguir corte de luz de "
-                    "caída de la nube")
+    # Reusa el mismo locator del cliente — si el fetch falla, este
+    # probe va a fallar igual (el BAW no está respondiendo a nada por
+    # LAN), y el mensaje queda como "posible corte de luz". Cuando el
+    # fetch funciona, está implícito que el BAW está vivo en la LAN.
+    lan_probe_fn = locator.esta_vivo
 
     # ── Chequeo de internet de peppygate ──────────────────────────
     # Distingue "el BAW perdió la nube" de "peppygate se quedó sin
